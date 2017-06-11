@@ -35,22 +35,73 @@ import org.apache.commons.lang.builder.HashCodeBuilder;
 public class RefLog {
 
 	@Data
-	@ToString(of = { "tableId", "name", "versions", "columns" })
-	public static class TableRef {
+	@ToString(of = { "tableId", "name", "versions" })
+	public static abstract class DataRef {
 
 		private String name;
 		private String tableId;
 		private final Set<Version> versions;
-		private final Map<String, ColumnRef> columns;
-		private final Set<SyncRef> outboundSyncs;
-		private final Set<SyncRef> inboundSyncs;
 		private final RefLog refLog;
 
-		private TableRef(RefLog refLog, String name, String tableId, Version version, Collection<ColumnRef> columns) {
+		private DataRef(RefLog refLog, String name, String tableId, Version version) {
 			this.name = name;
 			this.tableId = tableId;
 			this.refLog = refLog;
 			this.versions = Sets.newHashSet();
+		}
+
+		public DataRef rename(String newName) {
+			this.name = newName;
+			return this;
+		}
+
+		protected DataRef markAsPresent(Version version) {
+			getVersions().add(version);
+			getRefLog().refMapping.put(version, this);
+			log.debug("Marked TableRef: {} ({}) as present in version: {}", getName(), getTableId(), version.getId());
+			return this;
+		}
+
+		protected DataRef markAsAbsent(Version version) {
+			getVersions().remove(version);
+			getRefLog().refMapping.remove(version, this);
+			log.debug("Marked TableRef: {} ({}) as absent in version: {}", getName(), getTableId(), version.getId());
+			return this;
+		}
+
+		@Override
+		public boolean equals(Object other) {
+			if (other instanceof DataRef) {
+				DataRef otherRef = (DataRef) other;
+				return new EqualsBuilder()
+						.append(name, otherRef.getName())
+						.append(tableId, otherRef.getTableId())
+						.append(versions, otherRef.getVersions())
+						.isEquals();
+			}
+			return false;
+		}
+
+		@Override
+		public int hashCode() {
+			return new HashCodeBuilder()
+					.append(name)
+					.append(tableId)
+					.toHashCode();
+		}
+
+	}
+
+	@Data
+	@ToString(callSuper = true, of = { "columns" })
+	public static class TableRef extends DataRef {
+
+		private final Map<String, ColumnRef> columns;
+		private final Set<SyncRef> outboundSyncs;
+		private final Set<SyncRef> inboundSyncs;
+
+		private TableRef(RefLog refLog, String name, String tableId, Version version, Collection<ColumnRef> columns) {
+			super(refLog, name, tableId, version);
 			this.columns = Maps.newLinkedHashMap();
 			this.outboundSyncs = Sets.newHashSet();
 			this.inboundSyncs = Sets.newHashSet();
@@ -95,28 +146,13 @@ public class RefLog {
 					.collect(Collectors.toSet());
 		}
 
-		TableRef markAsPresent(Version version) {
-			versions.add(version);
-			refLog.tables.put(version, this);
-			log.debug("Marked TableRef: {} ({}) as present in version: {}", name, tableId, version.getId());
-			return this;
-		}
-
-		TableRef markAsAbsent(Version version) {
-//			checkArgument(versions.contains(version));
-			versions.remove(version);
-			refLog.tables.remove(version, this);
-			log.debug("Marked TableRef: {} ({}) as absent in version: {}", name, tableId, version.getId());
-			return this;
-		}
-
 		public TableRef ghost(String newTableId, Version version) {
 			Collection<ColumnRef> newColumns = columns.values().stream()
 					.map(ColumnRef::ghost)
 					.collect(Collectors.toList());
 
 			markAsAbsent(version);
-			return new TableRef(refLog, name, newTableId, version, newColumns);
+			return new TableRef(getRefLog(), getName(), newTableId, version, newColumns);
 		}
 
 		public TableRef addColumn(ColumnRef column) {
@@ -138,8 +174,8 @@ public class RefLog {
 		}
 
 		public TableRef renameColumn(String oldName, String newName) {
-			checkState(columns.containsKey(oldName), "Table: " + tableId + " does not contain a column: " + oldName);
-			checkState(!columns.containsKey(newName), "Table: " + tableId + " already contains a column: " + newName);
+			checkState(columns.containsKey(oldName), "Table: " + getTableId() + " does not contain a column: " + oldName);
+			checkState(!columns.containsKey(newName), "Table: " + getTableId() + " already contains a column: " + newName);
 
 			ColumnRef removed = columns.remove(oldName);
 			removed.name = newName;
@@ -148,17 +184,15 @@ public class RefLog {
 		}
 
 		public TableRef rename(String newTableName) {
-			this.name = newTableName;
+			super.rename(newTableName);
 			return this;
 		}
 
+		@Override
 		public boolean equals(Object other) {
 			if (other instanceof TableRef) {
 				TableRef otherRef = (TableRef) other;
-				return new EqualsBuilder()
-						.append(name, otherRef.getName())
-						.append(tableId, otherRef.getTableId())
-						.append(versions, otherRef.getVersions())
+				return super.equals(other) && new EqualsBuilder()
 						.append(columns, otherRef.getColumns())
 						.append(inboundSyncs, otherRef.getInboundSyncs())
 						.append(outboundSyncs, otherRef.getOutboundSyncs())
@@ -167,12 +201,6 @@ public class RefLog {
 			return false;
 		}
 
-		public int hashCode() {
-			return new HashCodeBuilder()
-					.append(name)
-					.append(tableId)
-					.toHashCode();
-		}
 	}
 
 	@Data
@@ -368,13 +396,13 @@ public class RefLog {
 		return new RefLog().bootstrap(catalog, version);
 	}
 
-	private final Multimap<Version, TableRef> tables;
+	private final Multimap<Version, DataRef> refMapping;
 
 	/**
 	 * Creates a new RefLog object.
 	 */
 	public RefLog() {
-		this.tables = LinkedHashMultimap.create();
+		this.refMapping = LinkedHashMultimap.create();
 	}
 
 	/**
@@ -411,10 +439,10 @@ public class RefLog {
 		checkArgument(version.getParent() != null, "You cannot fork to a root version!");
 
 		Version parent = version.getParent();
-		checkArgument(tables.isEmpty() || tables.keySet().contains(parent),
+		checkArgument(refMapping.isEmpty() || refMapping.keySet().contains(parent),
 				"You cannot fork to a version whose parent is not in the RefLog!");
 
-		tables.get(parent).forEach(table -> table.markAsPresent(version));
+		refMapping.get(parent).forEach(table -> table.markAsPresent(version));
 		return this;
 	}
 
@@ -422,7 +450,10 @@ public class RefLog {
 	 * @return a Collection of TableRef objects currently registered with this RefLog object.
 	 */
 	public Collection<TableRef> getTableRefs() {
-		return ImmutableSet.copyOf(tables.values());
+		return ImmutableSet.copyOf(refMapping.values().stream()
+				.filter(ref -> ref instanceof TableRef)
+				.map(ref -> (TableRef) ref)
+				.collect(Collectors.toSet()));
 	}
 
 	/**
@@ -431,7 +462,10 @@ public class RefLog {
 	 */
 	public Collection<TableRef> getTableRefs(Version version) {
 		checkArgument(version != null, "You must specify a version!");
-		return ImmutableSet.copyOf(tables.get(version));
+		return ImmutableSet.copyOf(refMapping.get(version).stream()
+				.filter(ref -> ref instanceof TableRef)
+				.map(ref -> (TableRef) ref)
+				.collect(Collectors.toSet()));
 	}
 
 	/**
@@ -447,7 +481,9 @@ public class RefLog {
 		checkArgument(version != null, "You must specify a version!");
 		checkArgument(!isNullOrEmpty(tableName), "You must specify a table name!");
 
-		return tables.get(version).stream()
+		return refMapping.get(version).stream()
+				.filter(ref -> ref instanceof TableRef)
+				.map(ref -> (TableRef) ref)
 				.filter(table -> table.getName().equals(tableName))
 				.findFirst()
 				.orElseThrow(() -> new IllegalArgumentException("Version: " + version.getId()
@@ -465,7 +501,9 @@ public class RefLog {
 	public TableRef getTableRefById(String tableId) {
 		checkArgument(!isNullOrEmpty(tableId), "You must specify a table ID!");
 
-		return tables.values().stream()
+		return refMapping.values().stream()
+				.filter(ref -> ref instanceof TableRef)
+				.map(ref -> (TableRef) ref)
 				.filter(table -> table.getTableId().equals(tableId))
 				.findFirst()
 				.orElseThrow(() -> new IllegalArgumentException("No table with id: " + tableId));
@@ -508,10 +546,10 @@ public class RefLog {
 		checkArgument(!isNullOrEmpty(tableName), "You must specify a table name!");
 
 		TableRef tableRef = getTableRef(version, tableName);
-		tableRef.versions.remove(version);
-		tables.remove(version, tableRef);
+		tableRef.getVersions().remove(version);
+		refMapping.remove(version, tableRef);
 
-		if (tableRef.versions.isEmpty()) {
+		if (tableRef.getVersions().isEmpty()) {
 			tableRef.drop();
 		}
 
@@ -526,12 +564,12 @@ public class RefLog {
 	public void dropTable(TableRef tableRef) {
 		checkArgument(tableRef != null, "You must specify a TableRef!");
 
-		List<Version> versions = tables.entries().stream()
+		List<Version> versions = refMapping.entries().stream()
 				.filter(entry -> entry.getValue().equals(tableRef))
 				.map(Entry::getKey)
 				.collect(Collectors.toList());
 
-		versions.forEach(version -> tables.remove(version, tableRef));
+		versions.forEach(version -> refMapping.remove(version, tableRef));
 		tableRef.drop();
 	}
 
@@ -563,7 +601,7 @@ public class RefLog {
 		checkArgument(version != null, "You must specify a 'version'!");
 		checkArgument(columns != null, "You must specify a collection of 'columns'!");
 
-		long matches = tables.get(version).stream()
+		long matches = refMapping.get(version).stream()
 				.filter(table -> table.getName().equals(name))
 				.count();
 
@@ -576,7 +614,7 @@ public class RefLog {
 	}
 
 	/**
-	 * Defines that there's a trigger and function which manage the synchronization between two different tables
+	 * Defines that there's a trigger and function which manage the synchronization between two different refMapping
 	 * in one particular direction.
 	 *
 	 * @param name The name of the trigger.
@@ -585,7 +623,7 @@ public class RefLog {
 	 * @return The constructed SyncRef object.
 	 */
 	public SyncRef addSync(String name, String functionName, Map<ColumnRef, ColumnRef> columns) {
-		long matches = tables.values().stream()
+		long matches = refMapping.values().stream()
 				.filter(table -> table.getName().equals(name))
 				.count();
 
@@ -688,13 +726,6 @@ public class RefLog {
 	private boolean isForwards(TableRef from, TableRef to) {
 		boolean forwards = false;
 		if (!from.equals(to)) {
-//			List<TableRef> toDo = Lists.newLinkedList(from.getBasisFor());
-//			while (!toDo.isEmpty()) {
-//				TableRef current = toDo.remove(0);
-//				if (current.equals(to)) {
-//					forwards = true;
-//				}
-//			}
 			Version origin = VersionTraverser.getFirst(from.getVersions());
 			Version target = VersionTraverser.getFirst(to.getVersions());
 			forwards = VersionTraverser.getDirection(origin, target) == Direction.FORWARDS;
@@ -706,7 +737,7 @@ public class RefLog {
 	 * @return An ImmutableSet of Versions covered by this RefLog.
 	 */
 	public ImmutableSet<Version> getVersions() {
-		return ImmutableSet.copyOf(tables.keySet());
+		return ImmutableSet.copyOf(refMapping.keySet());
 	}
 
 }
