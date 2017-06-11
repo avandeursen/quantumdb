@@ -20,7 +20,7 @@ class Transformer {
 
 		if (version != null && !version.isEmpty()) {
 			String query = new StringBuilder()
-					.append("SELECT table_id, table_name ")
+					.append("SELECT ref_id, table_name ")
 					.append("FROM quantumdb_table_versions ")
 					.append("WHERE version_id = ?;")
 					.toString();
@@ -30,9 +30,9 @@ class Transformer {
 
 				try (ResultSet resultSet = statement.executeQuery()) {
 					while (resultSet.next()) {
-						String tableId = resultSet.getString("table_id");
+						String refId = resultSet.getString("ref_id");
 						String tableName = resultSet.getString("table_name");
-						tableMapping.put(tableName, tableId);
+						tableMapping.put(tableName, refId);
 					}
 				}
 			}
@@ -47,7 +47,7 @@ class Transformer {
 		return result;
 	}
 
-	String getTableId(String tableName) {
+	String getRefId(String tableName) {
 		return tableMapping.get(tableName);
 	}
 

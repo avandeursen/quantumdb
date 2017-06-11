@@ -70,8 +70,8 @@ public class SyncFunction {
 	}
 
 	public void setColumnsToMigrate(Set<String> columnsToMigrate) {
-		Table sourceTable = catalog.getTable(source.getTableId());
-		Table targetTable = catalog.getTable(target.getTableId());
+		Table sourceTable = catalog.getTable(source.getRefId());
+		Table targetTable = catalog.getTable(target.getRefId());
 
 		Map<String, String> mapping = columnMapping.entrySet().stream()
 				.filter(entry -> {
@@ -144,10 +144,10 @@ public class SyncFunction {
 
 		if (useUpsert) {
 			Map<String, String> upsertExpressions = updateIdentities.entrySet().stream()
-					.collect(Collectors.toMap(entry -> target.getTableId() + "." + entry.getKey(), Entry::getValue));
+					.collect(Collectors.toMap(entry -> target.getRefId() + "." + entry.getKey(), Entry::getValue));
 
 			builder.append("  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN")
-					.append("    INSERT INTO " + target.getTableId())
+					.append("    INSERT INTO " + target.getRefId())
 					.append("    (" + represent(insertExpressions, Entry::getKey, ", ") + ") VALUES")
 					.append("    (" + represent(insertExpressions, Entry::getValue, ", ") + ")")
 					.append("      ON CONFLICT (" + represent(insertExpressions, Entry::getKey, ", ") + ") DO UPDATE")
@@ -156,17 +156,17 @@ public class SyncFunction {
 		}
 		else {
 			builder.append("  IF TG_OP = 'INSERT' THEN")
-					.append("    INSERT INTO " + target.getTableId())
+					.append("    INSERT INTO " + target.getRefId())
 					.append("      (" + represent(insertExpressions, Entry::getKey, ", ") + ") VALUES")
 					.append("      (" + represent(insertExpressions, Entry::getValue, ", ") + ");")
 					.append("  ELSIF TG_OP = 'UPDATE' THEN")
 					.append("    LOOP")
-					.append("      UPDATE " + target.getTableId())
+					.append("      UPDATE " + target.getRefId())
 					.append("        SET " + represent(updateIdentitiesForInserts, " = ", ", "))
 					.append("        WHERE " + represent(updateIdentities, " = ", " AND ") + ";")
 					.append("      IF found THEN EXIT; END IF;")
 					.append("      BEGIN")
-					.append("        INSERT INTO " + target.getTableId())
+					.append("        INSERT INTO " + target.getRefId())
 					.append("          (" + represent(insertExpressions, Entry::getKey, ", ") + ") VALUES")
 					.append("          (" + represent(insertExpressions, Entry::getValue, ", ") + ");")
 					.append("      EXIT;")
@@ -175,7 +175,7 @@ public class SyncFunction {
 		}
 
 		builder.append("  ELSIF TG_OP = 'DELETE' THEN")
-				.append("    DELETE FROM " + target.getTableId())
+				.append("    DELETE FROM " + target.getRefId())
 				.append("      WHERE " + represent(updateIdentities, " = ", " AND ") + ";")
 				.append("  END IF;")
 				.append("  RETURN NEW;")
@@ -201,7 +201,7 @@ public class SyncFunction {
 		return new QueryBuilder()
 				.append("CREATE TRIGGER " + triggerName)
 				.append("AFTER INSERT OR UPDATE OR DELETE")
-				.append("ON " + source.getTableId())
+				.append("ON " + source.getRefId())
 				.append("FOR EACH ROW")
 				.append("WHEN (pg_trigger_depth() = 0)")
 				.append("EXECUTE PROCEDURE " + functionName + "();");

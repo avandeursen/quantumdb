@@ -66,20 +66,20 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 				.filter(version -> version.getParent() != null)
 				.forEachOrdered(version -> migrator.migrate(version, (SchemaOperation) version.getOperation()));
 
-		Set<String> preTableIds = refLog.getTableRefs(from).stream()
-				.map(TableRef::getTableId)
+		Set<String> preRefIds = refLog.getTableRefs(from).stream()
+				.map(TableRef::getRefId)
 				.collect(Collectors.toSet());
 
-		Set<String> postTableIds = refLog.getTableRefs(to).stream()
-				.map(TableRef::getTableId)
+		Set<String> postRefIds = refLog.getTableRefs(to).stream()
+				.map(TableRef::getRefId)
 				.collect(Collectors.toSet());
 
-		Set<String> newTableIds = Sets.difference(postTableIds, preTableIds);
+		Set<String> newRefIds = Sets.difference(postRefIds, preRefIds);
 
-		log.debug("The following ghost tables will be created: " + newTableIds.stream()
+		log.debug("The following ghost tables will be created: " + newRefIds.stream()
 				.collect(Collectors.toMap(Function.identity(), (id) -> refLog.getTableRefById(id).getName())));
 
-		return new Planner(state, from, to, newTableIds, migrator.getRefLog()).createPlan();
+		return new Planner(state, from, to, newRefIds, migrator.getRefLog()).createPlan();
 	}
 
 	private static class Planner {
@@ -87,30 +87,30 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 		private final Catalog catalog;
 		private final Version from;
 		private final Version to;
-		private final Set<String> newTableIds;
+		private final Set<String> newRefIds;
 		private final RefLog refLog;
 
-		private Set<String> tableIdsWithNullRecords;
+		private Set<String> refIdsWithNullRecords;
 		private Builder plan;
 		private MigrationState migrationState;
 		private Graph graph;
 
-		public Planner(State state, Version from, Version to, Set<String> newTableIds, RefLog refLog) {
+		public Planner(State state, Version from, Version to, Set<String> newRefIds, RefLog refLog) {
 			this.catalog = state.getCatalog();
 			this.from = from;
 			this.to = to;
-			this.newTableIds = Sets.newHashSet(newTableIds);
+			this.newRefIds = Sets.newHashSet(newRefIds);
 			this.refLog = refLog;
 
-			this.tableIdsWithNullRecords = Sets.newHashSet();
-			this.graph = Graph.fromCatalog(catalog, newTableIds);
+			this.refIdsWithNullRecords = Sets.newHashSet();
+			this.graph = Graph.fromCatalog(catalog, newRefIds);
 			this.migrationState = new MigrationState(catalog);
 			this.plan = Plan.builder(migrationState);
 		}
 
 		private void reset() {
-			this.tableIdsWithNullRecords = Sets.newHashSet();
-			this.graph = Graph.fromCatalog(catalog, newTableIds);
+			this.refIdsWithNullRecords = Sets.newHashSet();
+			this.graph = Graph.fromCatalog(catalog, newRefIds);
 			this.migrationState = new MigrationState(catalog);
 			this.plan = Plan.builder(migrationState);
 		}
@@ -133,7 +133,7 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 			}
 			addDropNullsStep();
 
-			Set<Table> ghostTables = newTableIds.stream()
+			Set<Table> ghostTables = newRefIds.stream()
 					.map(catalog::getTable)
 					.collect(Collectors.toSet());
 
@@ -142,19 +142,19 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 
 		private Set<String> listToDo() {
 			return Sets.difference(
-					Sets.difference(graph.getTableIds(), migrationState.getPartiallyMigratedTables()),
+					Sets.difference(graph.getRefIds(), migrationState.getPartiallyMigratedTables()),
 					migrationState.getMigratedTables());
 		}
 
-		private Set<Step> migrateCoreTables(Set<String> tableIds) {
-			GraphResult most = graph.mostIncomingForeignKeys(tableIds).get();
+		private Set<Step> migrateCoreTables(Set<String> refIds) {
+			GraphResult most = graph.mostIncomingForeignKeys(refIds).get();
 			List<String> toMigrate = Lists.newArrayList(most.getTableNames());
 			log.debug("Migrating tables: " + toMigrate);
 
 			Set<Step> newSteps = Sets.newHashSet();
 			while (!toMigrate.isEmpty()) {
-				String tableId = toMigrate.remove(0);
-				Table table = catalog.getTable(tableId);
+				String refId = toMigrate.remove(0);
+				Table table = catalog.getTable(refId);
 				Set<String> columns = table.getColumns().stream()
 						.filter(column -> {
 							if (most.getCount() == 0) {
@@ -165,9 +165,9 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 								return true;
 							}
 
-							String otherTableId = outgoingForeignKey.getReferredTableName();
-							return !graph.getTableIds().contains(otherTableId) ||
-									migrationState.getProgress(otherTableId) != Progress.PENDING;
+							String otherRefId = outgoingForeignKey.getReferredTableName();
+							return !graph.getRefIds().contains(otherRefId) ||
+									migrationState.getProgress(otherRefId) != Progress.PENDING;
 						})
 						.map(Column::getName)
 						.collect(Collectors.toCollection(Sets::newLinkedHashSet));
@@ -178,7 +178,7 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 
 				SetView<String> missingIdentityColumns = Sets.difference(identityColumns, columns);
 				if (!missingIdentityColumns.isEmpty()) {
-					toMigrate.add(0, tableId);
+					toMigrate.add(0, refId);
 
 					List<Table> parentTables = table.getIdentityColumns().stream()
 							.map(Column::getOutgoingForeignKey)
@@ -234,16 +234,16 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 			return newSteps;
 		}
 
-		private Set<Step> migrateTables(Set<String> tableIds) {
-			List<String> toMigrate = Lists.newArrayList(tableIds);
+		private Set<Step> migrateTables(Set<String> refIds) {
+			List<String> toMigrate = Lists.newArrayList(refIds);
 			log.debug("Migrating tables: " + toMigrate);
 
 
 			Set<Step> newSteps = Sets.newHashSet();
 			while (!toMigrate.isEmpty()) {
-				String tableId = toMigrate.remove(0);
+				String refId = toMigrate.remove(0);
 
-				Table table = catalog.getTable(tableId);
+				Table table = catalog.getTable(refId);
 				Set<String> columns = table.getColumns().stream()
 						.filter(column -> {
 							ForeignKey outgoingForeignKey = column.getOutgoingForeignKey();
@@ -251,9 +251,9 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 								return true;
 							}
 
-							String otherTableId = outgoingForeignKey.getReferredTableName();
-							return !graph.getTableIds().contains(otherTableId) ||
-									migrationState.getProgress(otherTableId) != Progress.PENDING;
+							String otherRefId = outgoingForeignKey.getReferredTableName();
+							return !graph.getRefIds().contains(otherRefId) ||
+									migrationState.getProgress(otherRefId) != Progress.PENDING;
 						})
 						.map(Column::getName)
 						.collect(Collectors.toCollection(Sets::newLinkedHashSet));
@@ -264,7 +264,7 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 
 				SetView<String> missingIdentityColumns = Sets.difference(identityColumns, columns);
 				if (!missingIdentityColumns.isEmpty()) {
-					toMigrate.add(0, tableId);
+					toMigrate.add(0, refId);
 
 					List<Table> parentTables = table.getIdentityColumns().stream()
 							.map(Column::getOutgoingForeignKey)
@@ -321,7 +321,7 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 		}
 
 		private void addDropNullsStep() {
-			Set<Table> tables = tableIdsWithNullRecords.stream()
+			Set<Table> tables = refIdsWithNullRecords.stream()
 					.map(catalog::getTable)
 					.collect(Collectors.toSet());
 
@@ -371,14 +371,14 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 					}
 
 					Table otherTable = foreignKey.getReferredTable();
-					if (!tableIdsWithNullRecords.contains(otherTable.getName())) {
+					if (!refIdsWithNullRecords.contains(otherTable.getName())) {
 						TableNode tableNode = graph.get(otherTable.getName());
 						if (tableNode == null) {
 							expand(Sets.newHashSet(otherTable.getName()));
 							throw new ResetException();
 						}
 						else {
-							tableIdsWithNullRecords.add(otherTable.getName());
+							refIdsWithNullRecords.add(otherTable.getName());
 							if (operationType == Type.ADD_NULL) {
 								step.getOperation().addTable(otherTable);
 								applyDependencyRule(step);
@@ -409,9 +409,9 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 				Table table = catalog.getTable(tableName);
 				boolean allDependenciesMigrated = table.getForeignKeys().stream()
 						.allMatch(foreignKey -> {
-							String otherTableId = foreignKey.getReferredTableName();
-							return !graph.getTableIds().contains(otherTableId) ||
-									migrationState.getProgress(otherTableId) != Progress.PENDING;
+							String otherRefId = foreignKey.getReferredTableName();
+							return !graph.getRefIds().contains(otherRefId) ||
+									migrationState.getProgress(otherRefId) != Progress.PENDING;
 						});
 
 				if (allDependenciesMigrated) {
@@ -453,74 +453,74 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 			}
 		}
 
-		private void expand(Set<String> tableIdsToExpand) {
-			log.trace("Creating ghost tables for: " + tableIdsToExpand);
+		private void expand(Set<String> refIdsToExpand) {
+			log.trace("Creating ghost tables for: " + refIdsToExpand);
 
-			List<String> tableIdsToMirror = Lists.newArrayList(tableIdsToExpand);
-			Multimap<TableRef, TableRef> ghostedTableIds = refLog.getTableMapping(from, to, true);
-			Set<String> createdGhostTableIds = Sets.newHashSet();
+			List<String> refIdsToMirror = Lists.newArrayList(refIdsToExpand);
+			Multimap<TableRef, TableRef> ghostedRefIds = refLog.getTableMapping(from, to, true);
+			Set<String> createdGhostRefIds = Sets.newHashSet();
 
-			while(!tableIdsToMirror.isEmpty()) {
-				String tableId = tableIdsToMirror.remove(0);
-				if (ghostedTableIds.entries().stream()
-						.anyMatch(entry -> entry.getKey().getTableId().equals(tableId))) {
+			while(!refIdsToMirror.isEmpty()) {
+				String refId = refIdsToMirror.remove(0);
+				if (ghostedRefIds.entries().stream()
+						.anyMatch(entry -> entry.getKey().getRefId().equals(refId))) {
 					continue;
 				}
 
-				TableRef tableRef = refLog.getTableRefById(tableId);
-				Table table = catalog.getTable(tableRef.getTableId());
+				TableRef tableRef = refLog.getTableRefById(refId);
+				Table table = catalog.getTable(tableRef.getRefId());
 
-				String newTableId = RandomHasher.generateTableId(refLog);
-				TableRef ghostTableRef = tableRef.ghost(newTableId, to);
+				String newRefId = RandomHasher.generateRefId(refLog);
+				TableRef ghostTableRef = tableRef.ghost(newRefId, to);
 
-				Table ghostTable = table.copy().rename(ghostTableRef.getTableId());
+				Table ghostTable = table.copy().rename(ghostTableRef.getRefId());
 				catalog.addTable(ghostTable);
 
-				createdGhostTableIds.add(ghostTableRef.getTableId());
-				ghostedTableIds.put(tableRef, ghostTableRef);
+				createdGhostRefIds.add(ghostTableRef.getRefId());
+				ghostedRefIds.put(tableRef, ghostTableRef);
 
-				log.debug("Planned creation of ghost table: {} for source table: {}", newTableId, tableRef.getName());
+				log.debug("Planned creation of ghost table: {} for source table: {}", newRefId, tableRef.getName());
 
 				// Traverse incoming foreign keys
 				TableRef oldTableRef = refLog.getTableRef(from, tableRef.getName());
-				Set<String> tableIdsAtOrigin = refLog.getTableRefs(from).stream()
-						.map(TableRef::getTableId)
+				Set<String> refIdsAtOrigin = refLog.getTableRefs(from).stream()
+						.map(TableRef::getRefId)
 						.collect(Collectors.toSet());
 
-				catalog.getTablesReferencingTable(oldTableRef.getTableId()).stream()
-						.filter(tableIdsAtOrigin::contains)
-						.filter(referencingTableId -> !ghostedTableIds.containsKey(referencingTableId)
-								&& !tableIdsToMirror.contains(referencingTableId))
+				catalog.getTablesReferencingTable(oldTableRef.getRefId()).stream()
+						.filter(refIdsAtOrigin::contains)
+						.filter(referencingRefId -> !ghostedRefIds.containsKey(referencingRefId)
+								&& !refIdsToMirror.contains(referencingRefId))
 						.distinct()
-						.forEach(tableIdsToMirror::add);
+						.forEach(refIdsToMirror::add);
 			}
 
 			// Copying foreign keys for each affected table.
-			for (Entry<TableRef, TableRef> entry : ghostedTableIds.entries()) {
+			for (Entry<TableRef, TableRef> entry : ghostedRefIds.entries()) {
 				TableRef oldTableRef = entry.getKey();
 				TableRef newTableRef = entry.getValue();
 
-				Table oldTable = catalog.getTable(oldTableRef.getTableId());
-				Table newTable = catalog.getTable(newTableRef.getTableId());
+				Table oldTable = catalog.getTable(oldTableRef.getRefId());
+				Table newTable = catalog.getTable(newTableRef.getRefId());
 
-				if (newTableIds.contains(newTableRef.getTableId())) {
+				if (newRefIds.contains(newTableRef.getRefId())) {
 					List<ForeignKey> foreignKeysToFix = newTable.getForeignKeys().stream()
 							.filter(fk -> {
-								String referredTableId = fk.getReferredTableName();
-								Set<String> tableIdsAsTarget = refLog.getTableRefs(to).stream()
-										.map(TableRef::getTableId)
+								String referredRefId = fk.getReferredTableName();
+								Set<String> refIdsAsTarget = refLog.getTableRefs(to).stream()
+										.map(TableRef::getRefId)
 										.collect(Collectors.toSet());
 
-								return !tableIdsAsTarget.contains(referredTableId);
+								return !refIdsAsTarget.contains(referredRefId);
 							})
 							.collect(Collectors.toList());
 
 					foreignKeysToFix.forEach(fk -> {
 						fk.drop();
-						String referredTableId = fk.getReferredTableName();
-						TableRef referredTableRef = refLog.getTableRefById(referredTableId);
+						String referredRefId = fk.getReferredTableName();
+						TableRef referredTableRef = refLog.getTableRefById(referredRefId);
 						TableRef mappedTableRef = refLog.getTableRef(to, referredTableRef.getName());
-						Table referredTable = catalog.getTable(mappedTableRef.getTableId());
+						Table referredTable = catalog.getTable(mappedTableRef.getRefId());
 
 						newTable.addForeignKey(fk.getReferencingColumns())
 								.named(fk.getForeignKeyName())
@@ -532,11 +532,11 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 				else {
 					List<ForeignKey> outgoingForeignKeys = Lists.newArrayList(oldTable.getForeignKeys());
 					for (ForeignKey foreignKey : outgoingForeignKeys) {
-						String oldReferredTableId = foreignKey.getReferredTableName();
-						TableRef oldReferredTableRef = refLog.getTableRefById(oldReferredTableId);
+						String oldReferredRefId = foreignKey.getReferredTableName();
+						TableRef oldReferredTableRef = refLog.getTableRefById(oldReferredRefId);
 						TableRef newReferredTableRef = refLog.getTableRef(to, oldReferredTableRef.getName());
 
-						Table newReferredTable = catalog.getTable(newReferredTableRef.getTableId());
+						Table newReferredTable = catalog.getTable(newReferredTableRef.getRefId());
 						newTable.addForeignKey(foreignKey.getReferencingColumns())
 								.named(foreignKey.getForeignKeyName())
 								.onUpdate(foreignKey.getOnUpdate())
@@ -546,7 +546,7 @@ public class GreedyMigrationPlanner implements MigrationPlanner {
 				}
 			}
 
-			newTableIds.addAll(createdGhostTableIds);
+			newRefIds.addAll(createdGhostRefIds);
 		}
 	}
 
